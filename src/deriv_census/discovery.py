@@ -13,9 +13,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from typing import Any, Awaitable, Callable
+
 from .config import GridConfig
-from .protocol import (CONTRACT_TYPES, ContractOffering, SymbolInfo,
-                       duration_to_seconds)
+from . import protocol
+from .protocol import (ACTIVE_SYMBOLS_VARIANTS, CONTRACT_TYPES,
+                       CONTRACTS_FOR_VARIANTS, ContractOffering, DerivError,
+                       SymbolInfo, duration_to_seconds, parse_active_symbols,
+                       parse_contracts_for)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +47,75 @@ class Cell:
         if self.duration_seconds % 60 == 0:
             return self.duration_seconds // 60, "m"
         return self.duration_seconds, "s"
+
+
+@dataclass(frozen=True)
+class SymbolProbe:
+    """Outcome of one attempt at an ``active_symbols`` request shape."""
+
+    variant: str
+    request: dict[str, Any]
+    count: int
+    error: str | None = None
+
+    @property
+    def worked(self) -> bool:
+        return self.error is None and self.count > 0
+
+
+async def resolve_active_symbols(
+    send: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+) -> tuple[list[SymbolInfo], list[SymbolProbe]]:
+    """Find a request shape that actually returns instruments.
+
+    Tries each known variant in turn and stops at the first that returns a
+    non-empty list. Returns the symbols alongside the full attempt log, so a
+    total failure reports which shapes were tried and what each one said
+    rather than a bare zero.
+    """
+    probes: list[SymbolProbe] = []
+    for variant, request in ACTIVE_SYMBOLS_VARIANTS:
+        try:
+            payload = await send(dict(request))
+        except DerivError as exc:
+            probes.append(SymbolProbe(variant, request, 0, str(exc)))
+            continue
+        except Exception as exc:  # noqa: BLE001 - a bad variant must not abort
+            probes.append(SymbolProbe(variant, request, 0, repr(exc)))
+            continue
+        symbols = parse_active_symbols(payload)
+        probes.append(SymbolProbe(variant, request, len(symbols)))
+        if symbols:
+            log.info("active_symbols variant %r returned %d symbols",
+                     variant, len(symbols))
+            return symbols, probes
+    log.error("no active_symbols variant returned instruments; tried %s",
+              [p.variant for p in probes])
+    return [], probes
+
+
+async def resolve_contracts_for(
+    send: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    symbol: str,
+    currency: str = "USD",
+) -> tuple[list[ContractOffering], list[SymbolProbe]]:
+    """Fetch a symbol's offerings, trying each request shape until one works."""
+    probes: list[SymbolProbe] = []
+    for variant, product_type in CONTRACTS_FOR_VARIANTS:
+        request = protocol.contracts_for(symbol, currency, product_type)
+        try:
+            payload = await send(dict(request))
+        except DerivError as exc:
+            probes.append(SymbolProbe(variant, request, 0, str(exc)))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            probes.append(SymbolProbe(variant, request, 0, repr(exc)))
+            continue
+        offerings = parse_contracts_for(payload)
+        probes.append(SymbolProbe(variant, request, len(offerings)))
+        if offerings:
+            return offerings, probes
+    return [], probes
 
 
 def is_excluded(symbol: SymbolInfo, patterns: list[str]) -> bool:

@@ -189,3 +189,19 @@ async def test_subscriptions_are_released_on_rotation(tmp_path):
                     + server.request_counts.get("forget_all", 0))
     assert opened > 4
     assert released >= opened * 0.5
+
+
+async def test_capture_works_when_only_a_later_symbol_shape_is_accepted(tmp_path):
+    """The live failure: the first request shape returns an empty list. The
+    run must find a shape that works rather than reporting no instruments."""
+    async with FakeDerivServer(FakeConfig(
+            active_symbols_requires={"landing_company_short": "svg"})) as server:
+        _, runner = await capture(server, tmp_path, seconds=6.0)
+
+    assert runner.stats.proposals_recorded > 0
+    probes = [e for e in read_stream(tmp_path, EVENTS)
+              if e["kind"] == "active_symbols_probe"]
+    assert probes, "every attempt must be recorded for diagnosis"
+    assert not probes[0]["count"]                      # first shape found nothing
+    assert probes[-1]["count"] > 0                     # a later one worked
+    assert probes[-1]["variant"] == "brief+svg"

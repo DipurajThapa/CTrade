@@ -122,7 +122,9 @@ async def test_preflight_dump_captures_every_exchange_verbatim(tmp_path):
     payload = json.loads(dump.read_text())
     labels = [e["label"] for e in payload["exchanges"]]
     assert "ping" in labels
-    assert "active_symbols" in labels
+    # Every attempted request shape is recorded under its own label, which is
+    # what makes an accepted-but-empty response diagnosable.
+    assert any(l.startswith("active_symbols:") for l in labels)
     assert any(l.startswith("contracts_for:") for l in labels)
     assert any(l.startswith("proposal:CALL:") for l in labels)
     assert any(l.startswith("proposal:CALLE:") for l in labels)
@@ -130,7 +132,8 @@ async def test_preflight_dump_captures_every_exchange_verbatim(tmp_path):
 
     # Responses must be stored verbatim, not summarised, or they cannot be
     # used to verify parsing.
-    active = next(e for e in payload["exchanges"] if e["label"] == "active_symbols")
+    active = next(e for e in payload["exchanges"]
+                  if e["label"].startswith("active_symbols:"))
     assert "active_symbols" in active["response"]
     assert active["response"]["active_symbols"][0]["symbol"]
 

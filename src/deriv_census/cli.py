@@ -27,7 +27,8 @@ from . import __version__
 from .analysis import build_report
 from .client import DerivClient
 from .config import CensusConfig, load_config
-from .discovery import build_cells, select_symbols
+from .discovery import (build_cells, resolve_active_symbols,
+                        resolve_contracts_for, select_symbols)
 from .protocol import DerivError
 from .ratelimit import TokenBucket
 from .report import render_text, write_html
@@ -110,11 +111,25 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
         pf.record("ping", True)
 
         # --- discovery -----------------------------------------------------
-        payload = await probe_request("active_symbols",
-                                      protocol.active_symbols(), timeout=30)
-        symbols = protocol.parse_active_symbols(payload)
-        pf.record("active_symbols", bool(symbols),
-                  f"{len(symbols)} symbols returned")
+        def symbols_label(payload: dict) -> str:
+            extras = "+".join(sorted(set(payload) - {"active_symbols"}))
+            base = f"active_symbols:{payload.get('active_symbols')}"
+            return f"{base}+{extras}" if extras else base
+
+        symbols, probes = await resolve_active_symbols(
+            lambda payload: probe_request(symbols_label(payload), payload,
+                                          timeout=30))
+        for probe in probes:
+            pf.record(f"active_symbols variant '{probe.variant}'", probe.worked,
+                      (f"{probe.count} symbols" if probe.error is None
+                       else f"error: {probe.error}")
+                      + f"   request={probe.request}")
+        if not symbols:
+            print("\n  None of the known active_symbols request shapes "
+                  "returned instruments.\n  The raw replies are in the "
+                  "capture file - send it back so the right shape can be "
+                  "identified.")
+            return 1
 
         selected = select_symbols(symbols, cfg.grid)
         open_syms = [s for s in selected if s.tradeable]
@@ -130,10 +145,16 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                   "(required to compare quotes for ties)")
 
         # --- contract availability -----------------------------------------
-        payload = await probe_request(
-            f"contracts_for:{probe.symbol}",
-            protocol.contracts_for(probe.symbol, cfg.grid.currency), timeout=30)
-        offerings = protocol.parse_contracts_for(payload)
+        offerings, cf_probes = await resolve_contracts_for(
+            lambda payload: probe_request(
+                f"contracts_for:{probe.symbol}"
+                f"{':product_type' if 'product_type' in payload else ''}",
+                payload, timeout=30),
+            probe.symbol, cfg.grid.currency)
+        for cf in cf_probes:
+            pf.record(f"contracts_for shape '{cf.variant}'", cf.worked,
+                      f"{cf.count} offerings" if cf.error is None
+                      else f"error: {cf.error}")
         available = {o.contract_type for o in offerings}
         for variant in cfg.grid.variants:
             rise, fall = protocol.CONTRACT_TYPES[variant]

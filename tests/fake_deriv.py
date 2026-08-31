@@ -44,6 +44,10 @@ class FakeConfig:
     #: Fail these contract types with a permanent error.
     reject_types: set[str] = field(default_factory=set)
     fail_every_nth_proposal: int = 0
+    #: When set, active_symbols returns an EMPTY list unless the request
+    #: contains every one of these key/value pairs. Reproduces the live
+    #: failure where one request shape returns nothing while another works.
+    active_symbols_requires: dict | None = None
     #: Advance tick epochs by this many seconds each tick instead of using the
     #: wall clock. Lets a six-second test produce hours of tick history, so the
     #: settlement measurement has something real to chew on.
@@ -138,6 +142,10 @@ class FakeDerivServer:
 
         elif "active_symbols" in msg:
             count("active_symbols")
+            required = cfg.active_symbols_requires
+            if required and any(msg.get(k) != v for k, v in required.items()):
+                await send({"msg_type": "active_symbols", "active_symbols": []})
+                return
             await send({"msg_type": "active_symbols", "active_symbols": [
                 {"symbol": s, "display_name": s.replace("frx", ""),
                  "market": "forex", "submarket": "major_pairs",

@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from . import protocol
 from .client import DerivClient, Subscription
 from .config import CensusConfig
-from .discovery import Cell, build_cells, select_symbols, summarise
+from .discovery import (Cell, build_cells, resolve_active_symbols,
+                        resolve_contracts_for, select_symbols, summarise)
 from .protocol import DerivError
 from .ratelimit import TokenBucket
 from .storage import EVENTS, PROPOSALS, TICKS, CensusStore
@@ -84,9 +85,14 @@ class CensusRunner:
     async def discover(self) -> list[Cell]:
         """Enumerate tradeable cells. Safe to call repeatedly mid-run."""
         grid = self.config.grid
-        response = await self.client.request(
-            protocol.active_symbols(), timeout=30.0)
-        symbols = protocol.parse_active_symbols(response)
+        symbols, probes = await resolve_active_symbols(
+            lambda payload: self.client.request(payload, timeout=30.0))
+        for probe in probes:
+            self.store.event("active_symbols_probe", variant=probe.variant,
+                             request=probe.request, count=probe.count,
+                             error=probe.error)
+        if not symbols:
+            log.error("no active_symbols variant returned instruments")
         selected = select_symbols(symbols, grid)
         log.info("discovery: %d symbols returned, %d selected",
                  len(symbols), len(selected))
@@ -94,16 +100,17 @@ class CensusRunner:
         cells: list[Cell] = []
         for sym in selected:
             self._pip_by_symbol[sym.symbol] = sym.pip
-            try:
-                payload = await self.client.request(
-                    protocol.contracts_for(sym.symbol, grid.currency),
-                    timeout=30.0)
-            except DerivError as exc:
-                log.warning("contracts_for %s failed: %s", sym.symbol, exc)
-                self.store.event("contracts_for_failed",
-                                 symbol=sym.symbol, error=str(exc))
+            offerings, probes = await resolve_contracts_for(
+                lambda payload: self.client.request(payload, timeout=30.0),
+                sym.symbol, grid.currency)
+            if not offerings:
+                log.warning("contracts_for %s returned nothing; tried %s",
+                            sym.symbol, [p.variant for p in probes])
+                self.store.event("contracts_for_failed", symbol=sym.symbol,
+                                 probes=[{"variant": p.variant,
+                                          "count": p.count,
+                                          "error": p.error} for p in probes])
                 continue
-            offerings = protocol.parse_contracts_for(payload)
             cells.extend(build_cells(sym, offerings, grid))
 
         cells = [c for c in cells if c.key not in self._dropped]

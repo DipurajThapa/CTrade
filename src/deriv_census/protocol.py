@@ -74,10 +74,58 @@ def active_symbols(product_type: str = "basic") -> dict[str, Any]:
     return {"active_symbols": "brief", "product_type": product_type}
 
 
+#: Request shapes to try when discovering instruments, most specific first.
+#:
+#: Deriv accepts several parameter combinations here and which one returns a
+#: populated list has varied -- with the account's landing company, with
+#: whether ``product_type`` is supplied, and over time. A single hardcoded
+#: shape that returns an empty list is indistinguishable from "the venue
+#: offers nothing", which is a bad failure: it reads as a market condition
+#: when it is really a request that needs a different parameter.
+#:
+#: So the shape is discovered rather than assumed. Every attempt and its
+#: response is recorded, which turns an opaque zero into a diagnosis.
+ACTIVE_SYMBOLS_VARIANTS: list[tuple[str, dict[str, Any]]] = [
+    ("brief+basic",
+     {"active_symbols": "brief", "product_type": "basic"}),
+    ("brief",
+     {"active_symbols": "brief"}),
+    ("full",
+     {"active_symbols": "full"}),
+    ("brief+svg",
+     {"active_symbols": "brief", "landing_company_short": "svg"}),
+    ("brief+basic+svg",
+     {"active_symbols": "brief", "product_type": "basic",
+      "landing_company_short": "svg"}),
+    ("brief+landing_company_svg",
+     {"active_symbols": "brief", "landing_company": "svg"}),
+]
+
+
 def contracts_for(symbol: str, currency: str = "USD",
-                  product_type: str = "basic") -> dict[str, Any]:
-    return {"contracts_for": symbol, "currency": currency,
-            "product_type": product_type}
+                  product_type: str | None = "basic") -> dict[str, Any]:
+    """Available contract types and duration bounds for one symbol.
+
+    ``product_type`` is optional because it is not harmless. On an
+    unauthenticated connection ``product_type="basic"`` makes
+    ``active_symbols`` return an empty list -- accepted, no error, just
+    nothing -- and the same parameter is accepted here. Sending it by
+    default and falling back to omitting it keeps the common case terse
+    without letting one parameter silently empty the grid.
+    """
+    msg: dict[str, Any] = {"contracts_for": symbol, "currency": currency}
+    if product_type is not None:
+        msg["product_type"] = product_type
+    return msg
+
+
+#: Request shapes to try for ``contracts_for``, most specific first. Same
+#: reasoning as ACTIVE_SYMBOLS_VARIANTS: an empty offering list is not
+#: evidence that a symbol offers no contracts.
+CONTRACTS_FOR_VARIANTS: list[tuple[str, str | None]] = [
+    ("with_product_type", "basic"),
+    ("plain", None),
+]
 
 
 def proposal(symbol: str, contract_type: str, duration: int, duration_unit: str,
