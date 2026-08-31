@@ -88,6 +88,9 @@ python3 -m venv .venv
 # 1. Validate the live API before committing two weeks. Run during market hours.
 .venv/bin/census preflight
 
+#    Optionally capture the raw exchanges as evidence:
+.venv/bin/census preflight --dump-raw capture.json
+
 # 2. Capture. Runs for the configured 14 days; safe to interrupt and resume.
 .venv/bin/census run
 
@@ -103,6 +106,13 @@ that a field name changed is fourteen days lost. It checks every assumption the
 package makes about the wire format — contract availability, duration bounds,
 the payout field, pip size, Rise/Fall payout symmetry, the tick stream — and
 reports each as PASS or FAIL. **Do not start a run until it passes.**
+
+`--dump-raw` writes every request/response pair verbatim to a JSON file. That
+file is the evidence the wire format matches what `protocol.py` parses, and it
+is shareable: it carries only public market data and the application id,
+because this client has no authentication path that could produce anything
+else. Failed exchanges are recorded too — an error response is exactly what
+explains a failed check.
 
 Register your own application id at <https://api.deriv.com/> and pass it as
 `DERIV_APP_ID` rather than committing it.

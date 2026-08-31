@@ -110,3 +110,74 @@ def test_missing_config_falls_back_to_defaults_with_a_warning(tmp_path, monkeypa
 def test_unknown_command_is_rejected():
     with pytest.raises(SystemExit):
         main(["frobnicate"])
+
+
+async def test_preflight_dump_captures_every_exchange_verbatim(tmp_path):
+    """The dump is the evidence: it lets protocol.py be checked against real
+    Deriv responses by someone who cannot reach the API themselves."""
+    dump = tmp_path / "capture.json"
+    async with FakeDerivServer() as server:
+        await run_preflight(preflight_config(server, tmp_path), str(dump))
+
+    payload = json.loads(dump.read_text())
+    labels = [e["label"] for e in payload["exchanges"]]
+    assert "ping" in labels
+    assert "active_symbols" in labels
+    assert any(l.startswith("contracts_for:") for l in labels)
+    assert any(l.startswith("proposal:CALL:") for l in labels)
+    assert any(l.startswith("proposal:CALLE:") for l in labels)
+    assert "tick" in labels
+
+    # Responses must be stored verbatim, not summarised, or they cannot be
+    # used to verify parsing.
+    active = next(e for e in payload["exchanges"] if e["label"] == "active_symbols")
+    assert "active_symbols" in active["response"]
+    assert active["response"]["active_symbols"][0]["symbol"]
+
+    proposal = next(e for e in payload["exchanges"]
+                    if e["label"].startswith("proposal:CALL:"))
+    assert proposal["response"]["proposal"]["payout"] > 0
+    assert proposal["request"]["basis"] == "stake"
+
+    assert payload["checks"] and all(c["passed"] for c in payload["checks"])
+
+
+async def test_preflight_dump_records_failures_too(tmp_path):
+    """An error response is exactly the evidence needed to explain a failure."""
+    dump = tmp_path / "capture.json"
+    async with FakeDerivServer(FakeConfig(
+            fail_every_nth_proposal=1)) as server:
+        await run_preflight(preflight_config(server, tmp_path), str(dump))
+    payload = json.loads(dump.read_text())
+    errored = [e for e in payload["exchanges"] if "error" in e]
+    assert errored
+    assert errored[0]["error"]["code"] == "RateLimit"
+
+
+async def test_preflight_dump_carries_no_credentials(tmp_path):
+    """The capture is meant to be shared, so it must contain nothing secret.
+    The client has no authentication path, so this is structural."""
+    dump = tmp_path / "capture.json"
+    async with FakeDerivServer() as server:
+        await run_preflight(preflight_config(server, tmp_path), str(dump))
+    text = dump.read_text().lower()
+    for secret in ("authorize", "api_token", "\"token\"", "password",
+                   "loginid", "balance"):
+        assert secret not in text, f"capture leaked {secret}"
+
+
+async def test_preflight_dump_survives_a_failed_run(tmp_path):
+    """A partial capture is still evidence; it must be written on the way out."""
+    dump = tmp_path / "capture.json"
+    async with FakeDerivServer(FakeConfig(
+            contract_types=["CALL", "PUT"])) as server:
+        code = await run_preflight(preflight_config(server, tmp_path), str(dump))
+    assert code == 1
+    assert dump.exists()
+    assert json.loads(dump.read_text())["exchanges"]
+
+
+async def test_preflight_without_dump_writes_nothing(tmp_path):
+    async with FakeDerivServer() as server:
+        await run_preflight(preflight_config(server, tmp_path))
+    assert not list(tmp_path.glob("*.json"))

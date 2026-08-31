@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from . import protocol
+from . import __version__
 from .analysis import build_report
 from .client import DerivClient
 from .config import CensusConfig, load_config
@@ -62,9 +63,20 @@ class Preflight:
         return all(ok for _, ok, _ in self.checks)
 
 
-async def run_preflight(cfg: CensusConfig) -> int:
+async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
+    """Validate every wire-format assumption against the live API.
+
+    ``dump_raw`` writes each request/response pair verbatim to a JSON file.
+    That file is the evidence: it lets the parsing in ``protocol.py`` be
+    checked against real Deriv responses by someone who cannot reach the API
+    themselves. It contains only public market data and the application id --
+    no account state, no credentials, because this client has no
+    authentication path to produce any.
+    """
     pf = Preflight()
     print(f"\nPreflight against {cfg.connection.url()}\n")
+
+    raw: list[dict] = []
 
     client = DerivClient(cfg.connection,
                          TokenBucket(cfg.rate_limit.requests_per_minute))
@@ -77,12 +89,28 @@ async def run_preflight(cfg: CensusConfig) -> int:
         return 1
     pf.record("websocket connect", True, cfg.connection.endpoint)
 
+    async def probe_request(label: str, payload: dict, **kwargs) -> dict:
+        """Issue a request, recording the exchange whether it succeeds or not.
+
+        Failures are recorded too: an error response is exactly the evidence
+        needed to work out why a check failed.
+        """
+        try:
+            response = await client.request(payload, **kwargs)
+        except DerivError as exc:
+            raw.append({"label": label, "request": payload,
+                        "error": {"code": exc.code, "message": exc.message}})
+            raise
+        raw.append({"label": label, "request": payload, "response": response})
+        return response
+
     try:
-        await client.request(protocol.ping())
+        await probe_request("ping", protocol.ping())
         pf.record("ping", True)
 
         # --- discovery -----------------------------------------------------
-        payload = await client.request(protocol.active_symbols(), timeout=30)
+        payload = await probe_request("active_symbols",
+                                      protocol.active_symbols(), timeout=30)
         symbols = protocol.parse_active_symbols(payload)
         pf.record("active_symbols", bool(symbols),
                   f"{len(symbols)} symbols returned")
@@ -101,7 +129,8 @@ async def run_preflight(cfg: CensusConfig) -> int:
                   "(required to compare quotes for ties)")
 
         # --- contract availability -----------------------------------------
-        payload = await client.request(
+        payload = await probe_request(
+            f"contracts_for:{probe.symbol}",
             protocol.contracts_for(probe.symbol, cfg.grid.currency), timeout=30)
         offerings = protocol.parse_contracts_for(payload)
         available = {o.contract_type for o in offerings}
@@ -131,11 +160,13 @@ async def run_preflight(cfg: CensusConfig) -> int:
                 if contract_type not in available:
                     continue
                 try:
-                    payload = await client.request(protocol.proposal(
-                        probe.symbol, contract_type,
-                        duration // 60 if duration % 60 == 0 else duration,
-                        "m" if duration % 60 == 0 else "s",
-                        cfg.grid.stake, cfg.grid.currency, subscribe=False),
+                    payload = await probe_request(
+                        f"proposal:{contract_type}:{duration}s",
+                        protocol.proposal(
+                            probe.symbol, contract_type,
+                            duration // 60 if duration % 60 == 0 else duration,
+                            "m" if duration % 60 == 0 else "s",
+                            cfg.grid.stake, cfg.grid.currency, subscribe=False),
                         timeout=30)
                 except DerivError as exc:
                     pf.record(f"proposal {contract_type}", False, str(exc))
@@ -178,6 +209,8 @@ async def run_preflight(cfg: CensusConfig) -> int:
                 break
             if msg and msg.get("tick"):
                 received.append(msg["tick"])
+                raw.append({"label": "tick", "request": protocol.ticks(probe.symbol),
+                            "response": msg})
         await client.unsubscribe(sub)
         pf.record("tick stream", len(received) >= 2,
                   f"{len(received)} ticks in 15s; "
@@ -185,6 +218,21 @@ async def run_preflight(cfg: CensusConfig) -> int:
 
     finally:
         await client.close()
+        if dump_raw:
+            path = Path(dump_raw)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                            time.gmtime()),
+                "endpoint": cfg.connection.endpoint,
+                "app_id": cfg.connection.app_id,
+                "package_version": __version__,
+                "checks": [{"name": n, "passed": ok, "detail": d}
+                           for n, ok, d in pf.checks],
+                "exchanges": raw,
+            }, indent=2, default=str), encoding="utf-8")
+            print(f"\nwrote raw API capture to {path} "
+                  f"({len(raw)} exchanges)")
 
     print()
     if pf.ok:
@@ -291,7 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("preflight", help="verify the live API before a run")
+    pre = sub.add_parser("preflight", help="verify the live API before a run")
+    pre.add_argument("--dump-raw", default=None, metavar="PATH",
+                     help="write every request/response pair verbatim to a "
+                          "JSON file, as evidence that the wire format "
+                          "matches what this package parses")
     run_cmd = sub.add_parser("run", help="capture payout and tick data")
     run_cmd.add_argument("--days", type=float, default=None,
                          help="override the configured capture duration")
@@ -310,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("config %s not found; using defaults", config_path)
 
     if args.command == "preflight":
-        return asyncio.run(run_preflight(cfg))
+        return asyncio.run(run_preflight(cfg, args.dump_raw))
     if args.command == "run":
         return asyncio.run(run_capture(cfg, args.days))
     if args.command in ("analyse", "analyze"):
