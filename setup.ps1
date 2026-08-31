@@ -35,12 +35,23 @@ foreach ($candidate in @("py -3", "python", "python3")) {
 if (-not $python) {
     Bad "Python 3.11+ not found."
     Write-Host ""
-    Write-Host "  Install it with this command, then run this script again:"
+    Write-Host "  1. Install it with this command:"
     Write-Host ""
-    Write-Host "      winget install Python.Python.3.12" -ForegroundColor Yellow
+    Write-Host "        winget install Python.Python.3.12" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  (Or download from https://www.python.org/downloads/ and TICK"
-    Write-Host "   the box that says 'Add python.exe to PATH' during install.)"
+    Write-Host "     (Or download from https://www.python.org/downloads/ and TICK"
+    Write-Host "      the box that says 'Add python.exe to PATH' during install.)"
+    Write-Host ""
+    Write-Host "  2. CLOSE this window and open a NEW PowerShell window." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "     Windows only tells programs about a newly installed Python"
+    Write-Host "     when a fresh window opens. Re-running in THIS window will"
+    Write-Host "     give you the same error and look like the install failed."
+    Write-Host ""
+    Write-Host "  3. In the new window, go back to this folder and run setup.bat:"
+    Write-Host ""
+    Write-Host "        cd `"$PWD`"" -ForegroundColor Yellow
+    Write-Host "        .\setup.bat" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter to close"
     exit 1
