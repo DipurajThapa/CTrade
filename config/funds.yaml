@@ -1,0 +1,50 @@
+# Fund cost census -- worked example
+#
+# Everything here comes from a fund factsheet or a broker's fee schedule.
+# No market data, no network. Replace with your own candidates and numbers.
+#
+# The two funds below track effectively the same global index. The US one has
+# a fee three times lower. Run the comparison and see which actually costs
+# more.
+
+plan:
+  initial_amount: 1000          # what you start with
+  monthly_contribution: 500     # what you add each month (0 for a lump sum)
+  horizon_years: 20
+  # Long-run global equity assumption, nominal, before costs. An assumption,
+  # not a forecast -- the ranking between funds barely moves with it, even
+  # though the absolute numbers do.
+  gross_return: 0.07
+  # Gross dividend yield of the index. This is what withholding tax bites on,
+  # so it matters more than its size suggests.
+  dividend_yield: 0.018
+
+platform:
+  commission_per_trade: 1.0     # flat fee per purchase, in your currency
+  commission_rate: 0.0          # or as a fraction, if your broker charges that
+  fx_spread: 0.002              # cost of AED -> USD. Banks charge many times
+                                # what a good broker does; check yours.
+  platform_fee: 0.0             # annual custody fee as a fraction, if any
+
+funds:
+  - name: "Irish UCITS global index"
+    ter: 0.0022                 # from the factsheet
+    domicile: "IE"
+    tracking_difference: 0.0005 # published tracking difference MINUS the TER
+    spread: 0.0007              # typical quoted bid-ask
+
+  - name: "US-domiciled global index"
+    ter: 0.0007
+    domicile: "US"
+    tracking_difference: 0.0002
+    spread: 0.0002
+
+  # To use a rate you have actually verified with an adviser, override it:
+  #
+  # - name: "Verified example"
+  #   ter: 0.0020
+  #   domicile: "IE"
+  #   withholding:
+  #     fund_level_rate: 0.15
+  #     investor_level_rate: 0.0
+  #     basis: "confirmed with adviser, 2026-08"

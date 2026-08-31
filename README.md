@@ -1,3 +1,20 @@
+# Cost censuses
+
+Two tools with one idea: **measure what a venue takes before committing to it.**
+
+| Tool | Question it answers |
+|---|---|
+| `census` | Can any achievable edge beat Deriv's house margin on short-horizon binaries? |
+| `fundcensus` | How much of a global index fund's return actually reaches you? |
+
+The second exists because the first returned a decisive answer, and because the
+question changes shape entirely once the instrument does. With a binary you are
+trying to beat a house margin. With an index fund you are not beating anything
+-- you are capturing a market's return and trying to lose as little of it as
+possible on the way to your account.
+
+---
+
 # Deriv Payout Census
 
 A two-week measurement that decides whether a short-horizon binary options
@@ -221,3 +238,68 @@ concurrency, streaming subscriptions and their release, permanent versus
 transient error handling, slow-consumer backpressure, reconnection, closed
 markets, interrupted captures, truncated files, frozen feeds, and every
 economic identity in `stats.py`.
+
+
+---
+
+# Fund Cost Census
+
+```bash
+.venv/bin/fundcensus compare -c config/funds.yaml
+```
+
+Needs no network and no market data. Every input comes from a fund factsheet or
+a broker's published fee schedule, so it runs anywhere in about a minute.
+
+## The term nobody compares
+
+Fund comparisons are made on the headline fee. For an investor whose country
+has no US income tax treaty, **dividend withholding tax is frequently larger**,
+and it appears on no factsheet:
+
+| | Fee | Dividend tax | **Total** |
+|---|---:|---:|---:|
+| Irish UCITS global index | 0.220% | 0.234% | **0.504%** |
+| US-domiciled global index | 0.070% | 0.590% | **0.680%** |
+
+The US fund has a fee three times lower and costs more to hold. Its
+distributions are taxed at the full statutory rate on the way out, where an
+Irish UCITS pays a reduced treaty rate at fund level and nothing on
+distribution.
+
+This is the same shape of finding as the settlement-tie rate in the binary
+census: a cost of the same order as the one everybody looks at, invisible
+unless measured, and decisive over a long horizon.
+
+## The lever that actually moves the number
+
+Starting with 1,000 and adding 500 a month for 20 years at 7%:
+
+| | Final value |
+|---|---:|
+| baseline | 241,198 |
+| **double the contribution** | **479,394** |
+| find an extra 4% a year | 383,915 |
+
+Doubling a contribution beats four extra percentage points of annual return --
+and one of those is a decision, while the other is more than most professional
+managers deliver over a decade. At small balances the contribution rate
+dominates the return rate by a wide margin.
+
+## Before acting on its output
+
+The withholding rates are **modelling defaults, not verified tax advice**. They
+depend on tax residency rather than location, they change, and they are the
+largest single term in the comparison. Confirm them with a qualified adviser,
+then set them explicitly in the config:
+
+```yaml
+withholding:
+  fund_level_rate: 0.15
+  investor_level_rate: 0.0
+  basis: "confirmed with adviser, 2026-08"
+```
+
+The tool also prints a reminder that US-domiciled holdings above roughly
+$60,000 can expose a non-US person to US estate tax at up to 40%. It does not
+model that, and it can exceed everything the tool does model.
