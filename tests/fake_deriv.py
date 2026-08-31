@@ -51,6 +51,10 @@ class FakeConfig:
     #: Country reported by website_status, and the entities serving it.
     clients_country: str = "za"
     landing_companies: dict | None = None
+    #: Symbols the venue rejects outright. Reproduces what Deriv returned for
+    #: a connection it serves no products to: OfferingsInvalidSymbol from
+    #: contracts_for and InvalidSymbol from ticks.
+    invalid_symbols: set | None = None
     #: Advance tick epochs by this many seconds each tick instead of using the
     #: wall clock. Lets a six-second test produce hours of tick history, so the
     #: settlement measurement has something real to chew on.
@@ -180,6 +184,10 @@ class FakeDerivServer:
 
         elif "contracts_for" in msg:
             count("contracts_for")
+            if cfg.invalid_symbols and msg["contracts_for"] in cfg.invalid_symbols:
+                await error("OfferingsInvalidSymbol",
+                            "There's no contract available for this symbol.")
+                return
             await send({"msg_type": "contracts_for", "contracts_for": {
                 "available": [
                     {"contract_type": ct, "contract_category": "callput",
@@ -231,6 +239,9 @@ class FakeDerivServer:
         elif "ticks" in msg:
             count("ticks")
             symbol = msg["ticks"]
+            if cfg.invalid_symbols and symbol in cfg.invalid_symbols:
+                await error("InvalidSymbol", f"Symbol {symbol} is invalid.")
+                return
             self._sub_seq += 1
             sub_id = f"sub-ticks-{self._sub_seq}"
 

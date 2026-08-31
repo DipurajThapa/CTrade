@@ -51,6 +51,21 @@ def configure_logging(verbose: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PreflightStop(Exception):
+    """Ends preflight early while still reaching the teardown and verdict.
+
+    Several checks are terminal -- a closed market, no instruments, a venue
+    that does not serve this location. Returning directly from inside the
+    body skipped the closing verdict, so a run could end having printed a
+    diagnosis but never the sentence that says what it means. Raising instead
+    keeps one exit path: teardown, capture written, verdict printed.
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class Preflight:
     """Records checks and prints them as they happen.
 
@@ -78,7 +93,8 @@ class Preflight:
         return all(ok for _, ok, _ in self.checks)
 
 
-async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
+async def diagnose_empty_offerings(pf: "Preflight", probe_request
+                                   ) -> tuple[str | None, bool]:
     """Establish why no instruments were returned.
 
     Deriv scopes offerings by jurisdiction, so an empty list under every
@@ -87,7 +103,8 @@ async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
     resolved, and ``landing_company`` reports which entities -- if any --
     cover it. Both are unauthenticated.
     """
-    country = None
+    country: str | None = None
+    served = True
     try:
         payload = await probe_request("website_status", protocol.website_status(),
                                       timeout=30)
@@ -100,7 +117,7 @@ async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
         pf.record("website_status", False, str(exc), advisory=True)
 
     if not country:
-        return
+        return None, served
 
     try:
         payload = await probe_request(f"landing_company:{country}",
@@ -110,7 +127,8 @@ async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
         entities = {key: value.get("shortcode")
                     for key, value in block.items()
                     if isinstance(value, dict) and value.get("shortcode")}
-        pf.record(f"landing_company for {country!r}", bool(entities),
+        served = bool(entities)
+        pf.record(f"landing_company for {country!r}", served,
                   f"entities: {entities}" if entities else
                   "no entity serves this country -- Deriv may not offer these "
                   "products from here, which no request tuning can change",
@@ -118,6 +136,7 @@ async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
     except Exception as exc:  # noqa: BLE001
         pf.record(f"landing_company for {country!r}", False, str(exc),
                   advisory=True)
+    return country, served
 
 
 async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
@@ -134,6 +153,10 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
     print(f"\nPreflight against {cfg.connection.url()}\n")
 
     raw: list[dict] = []
+    stop_code: int | None = None
+    # Bound before the body so the closing summary is safe on every exit
+    # path, including the terminal checks that stop early.
+    quotes: dict[str, float] = {}
 
     client = DerivClient(cfg.connection,
                          TokenBucket(cfg.rate_limit.requests_per_minute))
@@ -183,7 +206,12 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
             # Every request shape returning an empty list is not a malformed
             # request -- it is far more likely that nothing is offered to this
             # connection's jurisdiction. Establish which before giving up.
-            await diagnose_empty_offerings(pf, probe_request)
+            country, served = await diagnose_empty_offerings(pf, probe_request)
+            if not served:
+                print(venue_unavailable_summary(country))
+                pf.record("venue serves this location", False,
+                          f"Deriv lists no entity for country {country!r}")
+                raise _PreflightStop(1)
             print("\n  Discovery returned no instruments under any request "
                   "shape.\n  Falling back to asking for a price on the major "
                   "FX pairs directly:\n  a quote is the measurement anyway, "
@@ -203,7 +231,7 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
         pf.record("grid symbols after filtering", bool(selected),
                   f"{len(selected)} selected, {len(open_syms)} currently open")
         if not selected:
-            return 1
+            raise _PreflightStop(1)
 
         probe = (open_syms or selected)[0]
         pf.record("pip size from discovery", probe.pip is not None,
@@ -237,10 +265,9 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
             pf.record("market open for quoting", False,
                       f"{probe.symbol} is closed; re-run preflight during "
                       "market hours to validate quoting")
-            return 1 if not pf.ok else 0
+            raise _PreflightStop(1)
 
         # --- the measurement itself -----------------------------------------
-        quotes: dict[str, float] = {}
         duration = cfg.grid.durations_seconds[0]
         for variant in cfg.grid.variants:
             rise, fall = protocol.CONTRACT_TYPES[variant]
@@ -288,7 +315,11 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                              "  -> set grid.directions to ['rise','fall']"))
 
         # --- streaming -------------------------------------------------------
-        sub = await client.subscribe(protocol.ticks(probe.symbol))
+        try:
+            sub = await client.subscribe(protocol.ticks(probe.symbol))
+        except DerivError as exc:
+            pf.record("tick stream", False, f"{probe.symbol}: {exc}")
+            raise _PreflightStop(1) from exc
         received, deadline = [], time.monotonic() + 15
         while len(received) < 3 and time.monotonic() < deadline:
             try:
@@ -318,6 +349,8 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                   "no pip size from discovery or ticks; tie measurement would "
                   "be unreliable")
 
+    except _PreflightStop as stop:
+        stop_code = stop.code
     finally:
         await client.close()
         if dump_raw:
@@ -343,15 +376,55 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
         print(plain_english_summary(quotes, cfg.grid.durations_seconds[0]))
 
     print()
-    if pf.ok:
+    if pf.ok and stop_code in (None, 0):
         print("PREFLIGHT PASSED. The wire format matches what the census "
               "expects; a run will record valid data.")
     else:
         failed = [n for n, ok, _ in pf.checks if not ok]
         print("PREFLIGHT FAILED: " + ", ".join(failed))
-        print("Do not start a 14-day run until these pass.")
+        if any("venue serves this location" in name for name in failed):
+            print("This is a venue availability finding, not a fault to fix.")
+        else:
+            print("Do not start a 14-day run until these pass.")
     print()
+    if stop_code is not None:
+        return stop_code
     return 0 if pf.ok else 1
+
+
+def venue_unavailable_summary(country: str | None) -> str:
+    """State the jurisdiction finding plainly. It is a result, not a fault.
+
+    Deriv lists no entity covering the country the connection resolved to, so
+    every symbol is invalid and no request, parameter or credential changes
+    that. Reporting it as a configuration problem would send someone hunting
+    for a fix that does not exist.
+    """
+    where = f"'{country}'" if country else "this location"
+    return "\n".join([
+        "=" * 68,
+        "WHAT THIS MEANS",
+        "=" * 68,
+        "",
+        f"  Deriv sees this connection as coming from {where}, and lists no",
+        "  company of its own that serves it.",
+        "",
+        "  That is why every symbol came back invalid. Deriv is not offering",
+        "  these products to this location at all - so there is no payout to",
+        "  measure, and no configuration change that would reveal one.",
+        "",
+        "  This is a real answer, not a failure. It settles the venue",
+        "  question that has been open since the start:",
+        "",
+        "    - The measurement cannot be taken here, because there is",
+        "      nothing on offer to measure.",
+        "    - No amount of model quality changes an unavailable venue.",
+        "",
+        "  What it does NOT tell you is whether the economics would have",
+        "  worked somewhere Deriv does operate. That question is still open,",
+        "  and still worth answering before building anything.",
+        "=" * 68,
+    ])
 
 
 def plain_english_summary(quotes: dict[str, float], duration_s: int) -> str:

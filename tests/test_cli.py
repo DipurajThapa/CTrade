@@ -258,16 +258,43 @@ async def test_empty_discovery_reports_the_country_and_still_gets_a_quote(
     assert any(l.startswith("landing_company:") for l in labels)
 
 
-async def test_a_country_with_no_landing_company_is_named_as_the_cause(
+async def test_a_country_with_no_landing_company_is_reported_as_the_answer(
         tmp_path, capsys):
-    """If no entity serves the country, that is the answer and no request
-    tuning changes it. It must be stated, not buried."""
+    """Observed live: Deriv resolved the connection to 'ae' and listed no
+    entity serving it, so every symbol came back invalid. That is a result,
+    not a fault, and must be stated as one rather than sending someone
+    hunting for a configuration fix that does not exist."""
     async with FakeDerivServer(FakeConfig(
             active_symbols_requires={"impossible": "value"},
-            clients_country="us", landing_companies={})) as server:
-        await run_preflight(preflight_config(server, tmp_path))
+            clients_country="ae", landing_companies={})) as server:
+        code = await run_preflight(preflight_config(server, tmp_path))
     out = capsys.readouterr().out
     assert "no entity serves this country" in out
+    assert "WHAT THIS MEANS" in out
+    assert "lists no" in out and "'ae'" in out
+    assert "real answer, not a failure" in out
+    # It must not then blame a closed market or a firewall.
+    assert "venue availability finding" in out
+    assert "The currency market is closed" not in out
+    assert code == 1
+
+
+async def test_an_invalid_symbol_fails_as_a_check_not_a_traceback(
+        tmp_path, capsys):
+    """A venue that serves the country but rejects the fallback symbols must
+    still produce a readable report."""
+    async with FakeDerivServer(FakeConfig(
+            active_symbols_requires={"impossible": "value"},
+            clients_country="ae",
+            invalid_symbols={"frxEURUSD", "frxGBPUSD", "frxUSDJPY",
+                             "frxAUDUSD", "frxUSDCHF", "frxUSDCAD",
+                             "frxEURGBP"})) as server:
+        code = await run_preflight(preflight_config(server, tmp_path))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    assert "PREFLIGHT FAILED" in out          # the verdict still prints
+    assert "no contract available" in out
 
 
 async def test_diagnosis_survives_an_unsupported_status_call(tmp_path, capsys):
