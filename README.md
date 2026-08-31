@@ -77,6 +77,13 @@ roughly 0.90 there is no model that wins.
 
 ## Install
 
+**Windows:** double-click `setup.bat`. It installs everything, runs the
+self-test, and measures the payout. Use `setup.bat` rather than `setup.ps1`
+directly -- Windows blocks unsigned PowerShell scripts downloaded from the
+internet, and the `.bat` wrapper clears that mark first.
+
+**macOS / Linux:**
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
