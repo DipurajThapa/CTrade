@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deriv-payout-census"
+version = "1.0.0"
+description = "Measures Deriv's quoted payout and settlement-tie distribution to decide whether a short-horizon binary options strategy is mathematically viable before any capital is committed."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=13",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.1",
+    "pyarrow>=14",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+census = "deriv_census.cli:main"
+fundcensus = "fund_census.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::RuntimeWarning"]
