@@ -96,15 +96,49 @@ async def test_unsubscribe_releases_the_stream_server_side():
 
 
 async def test_slow_consumer_drops_oldest_rather_than_exhausting_memory():
-    """A stalled consumer must cost stale quotes, never the whole run."""
+    """A stalled consumer must cost stale quotes, never the whole run.
+
+    Driven through the dispatcher directly rather than by racing the fake
+    server against a sleep. The timing-based version needed roughly 1,500
+    messages inside 1.5s, which holds on Linux but not on Windows, where the
+    event loop timer granularity is about 15ms: the queue never filled and
+    the test failed against code that was working correctly.
+
+    Feeding the dispatcher is also a stricter test. It pins the exact drop
+    count and proves the OLDEST are the ones discarded, neither of which the
+    timing version could check.
+    """
     from deriv_census.client import QUEUE_MAXSIZE
-    async with FakeDerivServer(FakeConfig(tick_interval_s=0.001)) as server:
+    async with FakeDerivServer() as server:
         async with make_client(server) as client:
             sub = await client.subscribe(protocol.ticks("frxEURUSD"))
-            await asyncio.sleep(1.5)          # never drain
-            assert sub.queue.qsize() <= QUEUE_MAXSIZE
-            assert sub.dropped > 0
-            assert client.stats.dropped_updates > 0
+
+            # Clear anything the live subscription already delivered so the
+            # counts below are exact. No await from here to the assertions,
+            # so the reader task cannot interleave.
+            while not sub.queue.empty():
+                sub.queue.get_nowait()
+            sub.dropped = 0
+            client.stats.dropped_updates = 0
+
+            overflow = 25
+            for epoch in range(QUEUE_MAXSIZE + overflow):
+                client._dispatch({
+                    "req_id": sub.req_id, "msg_type": "tick",
+                    "tick": {"symbol": "frxEURUSD", "epoch": epoch,
+                             "quote": 1.1, "pip_size": 1e-05}})
+
+            assert sub.queue.qsize() == QUEUE_MAXSIZE     # bounded, not growing
+            assert sub.dropped == overflow                # exactly the excess
+            assert client.stats.dropped_updates == overflow
+
+            # The newest quote must survive: a stale quote is worthless, the
+            # current one is the whole point.
+            newest = None
+            while not sub.queue.empty():
+                newest = sub.queue.get_nowait()
+            assert newest["tick"]["epoch"] == QUEUE_MAXSIZE + overflow - 1
+
             await client.unsubscribe(sub)
 
 
