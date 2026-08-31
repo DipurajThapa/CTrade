@@ -94,12 +94,33 @@ python3 -m venv .venv
 # 2. Capture. Runs for the configured 14 days; safe to interrupt and resume.
 .venv/bin/census run
 
-# 3. Verdict.
+# 3. Watch it fill up. Open http://127.0.0.1:8765 and leave it.
+.venv/bin/census serve
+
+# 4. Verdict.
 .venv/bin/census analyse
 
 # Optional: Parquet copies of the raw streams for your own analysis.
 .venv/bin/census export
 ```
+
+### The monitor
+
+`census serve` is a standard-library HTTP server — no framework, no build step,
+nothing extra to install on the machine that has to stay up for a fortnight. It
+binds to localhost only.
+
+It shows the live verdict and per-cell economics, plus a header answering the
+question that matters at 3am: **is the capture still alive?** A run whose
+heartbeat has stopped shows as `stalled` rather than quietly serving a stale
+page. JSON is at `/api/health`, `/api/verdict` and `/api/cells` if you want to
+alert on it.
+
+The page reuses the same renderer as the CLI, so the dashboard and the terminal
+cannot disagree about the numbers. The report is rebuilt at most once a minute,
+because building it reads the whole capture and that reaches gigabytes — a
+dashboard that re-read several GB per browser refresh would compete with the
+capture it is meant to observe.
 
 `preflight` exists because a fourteen-day run that discovers on day fourteen
 that a field name changed is fourteen days lost. It checks every assumption the

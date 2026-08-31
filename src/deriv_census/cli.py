@@ -2,6 +2,7 @@
 
     census preflight              verify the live API before committing a run
     census run                    the capture itself
+    census serve                  local dashboard for watching a capture
     census analyse                compute the verdict from captured data
     census export                 write Parquet copies of the raw streams
 
@@ -319,6 +320,25 @@ def run_analysis(cfg: CensusConfig, html_out: str | None) -> int:
     return 0
 
 
+def run_serve(cfg: CensusConfig, host: str, port: int, refresh: int) -> int:
+    from .server import serve
+
+    httpd = serve(cfg, host=host, port=port, refresh_s=refresh)
+    actual_host, actual_port = httpd.server_address[:2]
+    print(f"\nCensus monitor on http://{actual_host}:{actual_port}")
+    print(f"  reading  {Path(cfg.storage.root).resolve()}")
+    print(f"  JSON at  /api/health  /api/verdict  /api/cells")
+    print("  Ctrl-C to stop. This does not affect a running capture.\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("stopping")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    return 0
+
+
 def run_export(cfg: CensusConfig) -> int:
     out = Path("reports")
     for stream in ("proposals", "ticks", "events"):
@@ -347,6 +367,13 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd = sub.add_parser("run", help="capture payout and tick data")
     run_cmd.add_argument("--days", type=float, default=None,
                          help="override the configured capture duration")
+    srv = sub.add_parser("serve", help="local dashboard for watching a capture")
+    srv.add_argument("--host", default="127.0.0.1",
+                     help="bind address (default: localhost only)")
+    srv.add_argument("--port", type=int, default=8765)
+    srv.add_argument("--refresh", type=int, default=30,
+                     help="page auto-refresh interval in seconds")
+
     an = sub.add_parser("analyse", aliases=["analyze"],
                         help="compute the verdict from captured data")
     an.add_argument("--html", default="reports/census.html",
@@ -365,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_preflight(cfg, args.dump_raw))
     if args.command == "run":
         return asyncio.run(run_capture(cfg, args.days))
+    if args.command == "serve":
+        return run_serve(cfg, args.host, args.port, args.refresh)
     if args.command in ("analyse", "analyze"):
         return run_analysis(cfg, args.html or None)
     if args.command == "export":
