@@ -181,3 +181,47 @@ async def test_preflight_without_dump_writes_nothing(tmp_path):
     async with FakeDerivServer() as server:
         await run_preflight(preflight_config(server, tmp_path))
     assert not list(tmp_path.glob("*.json"))
+
+
+@pytest.mark.parametrize("b,expect", [
+    (0.99, "Worth measuring properly"),
+    (0.97, "Worth measuring properly"),
+    (0.93, "Borderline"),
+    (0.90, "Borderline"),
+    (0.80, "too big"),
+    (0.45, "too big"),
+])
+def test_plain_english_verdict_tracks_the_payout(b, expect):
+    """A non-technical reader must get the right answer from prose alone."""
+    from deriv_census.cli import plain_english_summary
+    assert expect in plain_english_summary({"CALL": b}, 300)
+
+
+def test_plain_english_states_the_break_even_win_rate_correctly():
+    from deriv_census.cli import plain_english_summary
+    text = plain_english_summary({"CALL": 0.80}, 300)
+    assert "55.6% of the time" in text     # 1/(1+0.80)
+    assert "$18.00 if you win" in text     # $10 stake -> $18 gross
+    assert "5 minutes" in text
+
+
+def test_plain_english_always_warns_that_one_quote_is_not_the_verdict():
+    """Preflight sees one snapshot and no tie rate. Saying so is not optional."""
+    from deriv_census.cli import plain_english_summary
+    for b in (0.99, 0.90, 0.40):
+        assert "this is ONE quote" in plain_english_summary({"CALL": b}, 300)
+
+
+def test_plain_english_uses_the_median_across_contract_types():
+    from deriv_census.cli import plain_english_summary
+    text = plain_english_summary({"CALL": 0.90, "PUT": 0.90, "CALLE": 0.80}, 300)
+    assert "52.6% of the time" in text     # median is 0.90, not the mean
+
+
+async def test_preflight_prints_the_plain_english_box(tmp_path, capsys):
+    async with FakeDerivServer(FakeConfig(payout=0.45,
+                                          payout_jitter=0.0)) as server:
+        await run_preflight(preflight_config(server, tmp_path))
+    out = capsys.readouterr().out
+    assert "WHAT THIS MEANS" in out
+    assert "too big" in out

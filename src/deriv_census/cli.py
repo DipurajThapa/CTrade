@@ -236,6 +236,10 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                   f"({len(raw)} exchanges)")
 
     print()
+    if quotes:
+        print(plain_english_summary(quotes, cfg.grid.durations_seconds[0]))
+
+    print()
     if pf.ok:
         print("PREFLIGHT PASSED. The wire format matches what the census "
               "expects; a run will record valid data.")
@@ -245,6 +249,74 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
         print("Do not start a 14-day run until these pass.")
     print()
     return 0 if pf.ok else 1
+
+
+def plain_english_summary(quotes: dict[str, float], duration_s: int) -> str:
+    """Say what the measured payout means, without requiring any statistics.
+
+    Preflight is one snapshot, not the verdict -- it cannot see how the payout
+    varies, and it has no tie-rate measurement. But a snapshot is enough to
+    rule the venue out: if the break-even win rate is already far beyond what
+    a good model reaches, fourteen days of measurement will not rescue it.
+    """
+    import statistics
+
+    b = statistics.median(quotes.values())
+    p_be = 1.0 / (1.0 + b)
+    cut = p_be - 0.5
+
+    lines = [
+        "=" * 68,
+        "WHAT THIS MEANS",
+        "=" * 68,
+        "",
+        f"  On a $10 trade at {duration_s // 60 or duration_s} "
+        f"{'minute' if duration_s >= 60 else 'second'}"
+        f"{'s' if (duration_s // 60 or duration_s) != 1 else ''}, "
+        f"Deriv pays ${10 * (1 + b):.2f} if you win",
+        f"  and keeps your $10 if you lose.",
+        "",
+        f"  So to break even you must be right {p_be:.1%} of the time.",
+        f"  A coin flip is 50%. Deriv's cut is the {cut:.1%} difference.",
+        "",
+    ]
+
+    # An out-of-sample information coefficient of 0.03-0.08 on short-horizon
+    # FX -- a good result, honestly measured -- is a win rate of 51.2-53.2%.
+    if p_be <= 0.515:
+        lines += [
+            "  A very good prediction system reaches about 51-53%.",
+            f"  {p_be:.1%} is inside that range.",
+            "",
+            "  VERDICT: Worth measuring properly. Run the 14-day capture.",
+        ]
+    elif p_be <= 0.532:
+        lines += [
+            "  A very good prediction system reaches about 51-53%.",
+            f"  {p_be:.1%} is at the top of that range - possible, but it",
+            "  needs your system to be genuinely world class.",
+            "",
+            "  VERDICT: Borderline. The 14-day capture is worth running,",
+            "  because the payout moves and some hours may be better.",
+        ]
+    else:
+        lines += [
+            "  A very good prediction system reaches about 51-53%.",
+            f"  {p_be:.1%} is beyond that. Not difficult - beyond.",
+            "",
+            "  VERDICT: Deriv's cut is too big here. No prediction system,",
+            "  however good, makes money at this payout. This is the",
+            "  answer you were looking for, and it cost you 30 seconds.",
+        ]
+
+    lines += [
+        "",
+        "  Caveat: this is ONE quote, right now. The payout moves through",
+        "  the day and the 14-day capture measures that properly. But a",
+        "  number far outside the range above will not be rescued by it.",
+        "=" * 68,
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
