@@ -102,6 +102,39 @@ ACTIVE_SYMBOLS_VARIANTS: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
+def website_status() -> dict[str, Any]:
+    """Site status, and crucially the country Deriv thinks you are in.
+
+    Deriv scopes its offerings by jurisdiction. An ``active_symbols`` list
+    that comes back empty for every request shape is far more likely to mean
+    "nothing is offered to this country" than "the request was malformed",
+    and ``clients_country`` is what distinguishes the two. Unauthenticated.
+    """
+    return {"website_status": 1}
+
+
+def landing_company(country: str) -> dict[str, Any]:
+    """Which Deriv entities serve a country, and what each may offer.
+
+    If no company covers the country, or none offers the relevant product,
+    that is the answer: the venue is unavailable from there, and no amount of
+    request tuning changes it.
+    """
+    return {"landing_company": country}
+
+
+#: Deriv's symbol codes for the major FX pairs.
+#:
+#: Used only when discovery returns nothing. Asking for a price directly is
+#: strictly more informative than a second opinion on the symbol list: a quote
+#: is the measurement the census exists to take, and an error carries a reason
+#: code. Either outcome beats an empty list.
+FALLBACK_FX_SYMBOLS: list[str] = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxUSDCHF", "frxUSDCAD", "frxEURGBP",
+]
+
+
 def contracts_for(symbol: str, currency: str = "USD",
                   product_type: str | None = "basic") -> dict[str, Any]:
     """Available contract types and duration bounds for one symbol.

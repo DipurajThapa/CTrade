@@ -52,17 +52,72 @@ def configure_logging(verbose: bool) -> None:
 
 
 class Preflight:
+    """Records checks and prints them as they happen.
+
+    Two kinds. A gating check decides whether a capture may start. An
+    advisory one is an observation on the way there -- which of several
+    request shapes a venue accepted, what country it resolved. Advisory
+    results are printed but do not fail the run: probing five shapes and
+    using the one that works is success, not five failures, and counting
+    them as failures would block a capture that is perfectly able to
+    proceed.
+    """
+
     def __init__(self) -> None:
         self.checks: list[tuple[str, bool, str]] = []
+        self.notes: list[tuple[str, bool, str]] = []
 
-    def record(self, name: str, ok: bool, detail: str = "") -> None:
-        self.checks.append((name, ok, detail))
-        print(f"  [{'PASS' if ok else 'FAIL'}] {name}"
-              + (f"\n         {detail}" if detail else ""))
+    def record(self, name: str, ok: bool, detail: str = "",
+               advisory: bool = False) -> None:
+        (self.notes if advisory else self.checks).append((name, ok, detail))
+        marker = "info" if advisory else ("PASS" if ok else "FAIL")
+        print(f"  [{marker}] {name}" + (f"\n         {detail}" if detail else ""))
 
     @property
     def ok(self) -> bool:
         return all(ok for _, ok, _ in self.checks)
+
+
+async def diagnose_empty_offerings(pf: "Preflight", probe_request) -> None:
+    """Establish why no instruments were returned.
+
+    Deriv scopes offerings by jurisdiction, so an empty list under every
+    request shape most likely means the venue serves nothing to this
+    connection's country. ``website_status`` reports the country Deriv
+    resolved, and ``landing_company`` reports which entities -- if any --
+    cover it. Both are unauthenticated.
+    """
+    country = None
+    try:
+        payload = await probe_request("website_status", protocol.website_status(),
+                                      timeout=30)
+        status = payload.get("website_status") or {}
+        country = status.get("clients_country")
+        pf.record("website_status", bool(status),
+                  f"Deriv resolves this connection to country={country!r}, "
+                  f"site_status={status.get('site_status')!r}", advisory=True)
+    except Exception as exc:  # noqa: BLE001 - diagnosis must not raise
+        pf.record("website_status", False, str(exc), advisory=True)
+
+    if not country:
+        return
+
+    try:
+        payload = await probe_request(f"landing_company:{country}",
+                                      protocol.landing_company(country),
+                                      timeout=30)
+        block = payload.get("landing_company") or {}
+        entities = {key: value.get("shortcode")
+                    for key, value in block.items()
+                    if isinstance(value, dict) and value.get("shortcode")}
+        pf.record(f"landing_company for {country!r}", bool(entities),
+                  f"entities: {entities}" if entities else
+                  "no entity serves this country -- Deriv may not offer these "
+                  "products from here, which no request tuning can change",
+                  advisory=True)
+    except Exception as exc:  # noqa: BLE001
+        pf.record(f"landing_company for {country!r}", False, str(exc),
+                  advisory=True)
 
 
 async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
@@ -123,13 +178,25 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
             pf.record(f"active_symbols variant '{probe.variant}'", probe.worked,
                       (f"{probe.count} symbols" if probe.error is None
                        else f"error: {probe.error}")
-                      + f"   request={probe.request}")
+                      + f"   request={probe.request}", advisory=True)
         if not symbols:
-            print("\n  None of the known active_symbols request shapes "
-                  "returned instruments.\n  The raw replies are in the "
-                  "capture file - send it back so the right shape can be "
-                  "identified.")
-            return 1
+            # Every request shape returning an empty list is not a malformed
+            # request -- it is far more likely that nothing is offered to this
+            # connection's jurisdiction. Establish which before giving up.
+            await diagnose_empty_offerings(pf, probe_request)
+            print("\n  Discovery returned no instruments under any request "
+                  "shape.\n  Falling back to asking for a price on the major "
+                  "FX pairs directly:\n  a quote is the measurement anyway, "
+                  "and a refusal carries a reason code.\n")
+            symbols = [protocol.SymbolInfo(code, code, "forex", "major_pairs",
+                                           True, False, None)
+                       for code in protocol.FALLBACK_FX_SYMBOLS]
+            pf.record("instruments resolved", True,
+                      f"{len(symbols)} major FX pairs assumed by fallback; "
+                      "the quote below is what proves them")
+        else:
+            pf.record("instruments resolved", True,
+                      f"{len(symbols)} returned by discovery")
 
         selected = select_symbols(symbols, cfg.grid)
         open_syms = [s for s in selected if s.tradeable]
@@ -139,10 +206,9 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
             return 1
 
         probe = (open_syms or selected)[0]
-        pf.record("pip size present", probe.pip is not None,
-                  f"{probe.symbol} pip={probe.pip} "
-                  f"decimals={probe.pip_decimals}  "
-                  "(required to compare quotes for ties)")
+        pf.record("pip size from discovery", probe.pip is not None,
+                  f"{probe.symbol} pip={probe.pip} decimals={probe.pip_decimals}",
+                  advisory=True)
 
         # --- contract availability -----------------------------------------
         offerings, cf_probes = await resolve_contracts_for(
@@ -154,7 +220,7 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
         for cf in cf_probes:
             pf.record(f"contracts_for shape '{cf.variant}'", cf.worked,
                       f"{cf.count} offerings" if cf.error is None
-                      else f"error: {cf.error}")
+                      else f"error: {cf.error}", advisory=True)
         available = {o.contract_type for o in offerings}
         for variant in cfg.grid.variants:
             rise, fall = protocol.CONTRACT_TYPES[variant]
@@ -238,6 +304,20 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                   f"{len(received)} ticks in 15s; "
                   f"sample={received[0] if received else 'none'}")
 
+        # Ties are decided by comparing quotes at the feed's own precision, so
+        # a pip size must be available from somewhere. The tick carries it,
+        # which is also where the analysis reads it, so discovery not
+        # supplying one is not a blocker.
+        tick_pip = next((t.get("pip_size") for t in received
+                         if t.get("pip_size")), None)
+        pip = probe.pip or tick_pip
+        pf.record("pip size available", pip is not None,
+                  f"pip={pip} (from {'discovery' if probe.pip else 'tick stream'})"
+                  "  -- needed to compare quotes exactly when measuring ties"
+                  if pip else
+                  "no pip size from discovery or ticks; tie measurement would "
+                  "be unreliable")
+
     finally:
         await client.close()
         if dump_raw:
@@ -251,6 +331,8 @@ async def run_preflight(cfg: CensusConfig, dump_raw: str | None = None) -> int:
                 "package_version": __version__,
                 "checks": [{"name": n, "passed": ok, "detail": d}
                            for n, ok, d in pf.checks],
+                "notes": [{"name": n, "ok": ok, "detail": d}
+                          for n, ok, d in pf.notes],
                 "exchanges": raw,
             }, indent=2, default=str), encoding="utf-8")
             print(f"\nwrote raw API capture to {path} "

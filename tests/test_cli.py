@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from deriv_census.cli import main, run_preflight
+from deriv_census.cli import diagnose_empty_offerings, main, run_preflight
 from deriv_census.config import (CensusConfig, ConnectionConfig, DecisionConfig,
                                  GridConfig, RateLimitConfig, StorageConfig)
 from deriv_census.storage import PROPOSALS, TICKS, CensusStore
@@ -228,3 +228,78 @@ async def test_preflight_prints_the_plain_english_box(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "WHAT THIS MEANS" in out
     assert "too big" in out
+
+
+# --- empty-offerings diagnosis and direct-quote fallback -----------------
+
+
+async def test_empty_discovery_reports_the_country_and_still_gets_a_quote(
+        tmp_path, capsys):
+    """Every request shape returning nothing is a jurisdiction question, not
+    a malformed request. Preflight must say which country Deriv resolved and
+    then try to price a pair directly -- a quote is the measurement anyway."""
+    async with FakeDerivServer(FakeConfig(
+            active_symbols_requires={"impossible": "value"},
+            clients_country="ae", payout=0.93)) as server:
+        code = await run_preflight(preflight_config(server, tmp_path),
+                                   str(tmp_path / "capture.json"))
+    out = capsys.readouterr().out
+    assert "website_status" in out
+    assert "country='ae'" in out
+    assert "landing_company" in out
+    assert "Falling back to asking for a price" in out
+    # The fallback must actually produce the measurement.
+    assert "WHAT THIS MEANS" in out
+    assert code == 0
+
+    payload = json.loads((tmp_path / "capture.json").read_text())
+    labels = [e["label"] for e in payload["exchanges"]]
+    assert "website_status" in labels
+    assert any(l.startswith("landing_company:") for l in labels)
+
+
+async def test_a_country_with_no_landing_company_is_named_as_the_cause(
+        tmp_path, capsys):
+    """If no entity serves the country, that is the answer and no request
+    tuning changes it. It must be stated, not buried."""
+    async with FakeDerivServer(FakeConfig(
+            active_symbols_requires={"impossible": "value"},
+            clients_country="us", landing_companies={})) as server:
+        await run_preflight(preflight_config(server, tmp_path))
+    out = capsys.readouterr().out
+    assert "no entity serves this country" in out
+
+
+async def test_diagnosis_survives_an_unsupported_status_call(tmp_path, capsys):
+    """A venue that rejects the diagnostic calls must not crash preflight, and
+    must not fail it either: a diagnosis is an observation, not a gate."""
+    from deriv_census.cli import Preflight
+
+    async def failing(_label, _payload, **_kw):
+        raise RuntimeError("not supported")
+
+    pf = Preflight()
+    await diagnose_empty_offerings(pf, failing)
+    assert pf.ok                                   # advisory, does not gate
+    assert any(name == "website_status" for name, _ok, _d in pf.notes)
+
+
+async def test_fallback_symbols_are_the_major_fx_pairs(tmp_path):
+    from deriv_census.protocol import FALLBACK_FX_SYMBOLS
+    assert "frxEURUSD" in FALLBACK_FX_SYMBOLS
+    assert all(s.startswith("frx") for s in FALLBACK_FX_SYMBOLS)
+
+
+async def test_pip_size_is_taken_from_the_tick_stream_when_discovery_lacks_it(
+        tmp_path, capsys):
+    """Ties are compared at the feed's precision, and the tick carries it.
+    Discovery not supplying a pip must not block a capture."""
+    async with FakeDerivServer(FakeConfig(
+            active_symbols_requires={"impossible": "value"},
+            clients_country="ae")) as server:
+        code = await run_preflight(preflight_config(server, tmp_path))
+    out = capsys.readouterr().out
+    assert "[info] pip size from discovery" in out
+    assert "pip size available" in out
+    assert "from tick stream" in out
+    assert code == 0

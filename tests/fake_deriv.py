@@ -48,6 +48,9 @@ class FakeConfig:
     #: contains every one of these key/value pairs. Reproduces the live
     #: failure where one request shape returns nothing while another works.
     active_symbols_requires: dict | None = None
+    #: Country reported by website_status, and the entities serving it.
+    clients_country: str = "za"
+    landing_companies: dict | None = None
     #: Advance tick epochs by this many seconds each tick instead of using the
     #: wall clock. Lets a six-second test produce hours of tick history, so the
     #: settlement measurement has something real to chew on.
@@ -157,6 +160,23 @@ class FakeDerivServer:
                  "market": "synthetic_index", "submarket": "random_index",
                  "exchange_is_open": 1, "is_trading_suspended": 0, "pip": 0.01}
             ]})
+
+        elif "website_status" in msg:
+            count("website_status")
+            await send({"msg_type": "website_status", "website_status": {
+                "clients_country": cfg.clients_country,
+                "site_status": "up",
+                "api_call_limits": {}}})
+
+        elif "landing_company" in msg:
+            count("landing_company")
+            companies = cfg.landing_companies
+            if companies is None:
+                companies = {"financial_company": {"shortcode": "svg"},
+                             "gaming_company": {"shortcode": "svg"}}
+            await send({"msg_type": "landing_company",
+                        "landing_company": {"country": msg["landing_company"],
+                                            **companies}})
 
         elif "contracts_for" in msg:
             count("contracts_for")
